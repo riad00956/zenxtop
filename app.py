@@ -1,456 +1,666 @@
-from flask import Flask, render_template, request, session, redirect, url_for
-from flask_socketio import SocketIO, emit
-import subprocess
 import os
+import subprocess
 import sqlite3
+import hashlib
 from datetime import datetime
-import json
-from threading import Lock
+from pathlib import Path
+from flask import Flask, render_template_string, request, session, redirect, jsonify
+from flask_socketio import SocketIO, emit
+import threading
 import time
-import atexit
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'cyber20un_secret_key_2024'
+app.secret_key = 'cyber_20_un_secret_key_2024'
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Database setup
-DB_NAME = 'cyber20un.db'
+# ডাটাবেজ এবং ডিরেক্টরি সেটআপ
+DB_PATH = 'cyber20un.db'
+CODE_DIR = Path('user_codes')
+CODE_DIR.mkdir(exist_ok=True)
 
+# HTML টেমপ্লেট (আপনার মূল HTML)
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Cyber 20 UN | Dual Terminal IDE</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        :root {
+            --bg: #020617; --purple: #8b5cf6; --blue: #3b82f6; --cyan: #06b6d4;
+            --text: #f8fafc; --glass: rgba(15, 23, 42, 0.8); --border: rgba(255, 255, 255, 0.1);
+        }
+        * { box-sizing: border-box; transition: all 0.3s ease; }
+        body {
+            margin: 0; font-family: 'Poppins', sans-serif; background: var(--bg);
+            color: var(--text); min-height: 100vh; overflow-x: hidden;
+            display: flex; flex-direction: column;
+        }
+        #bgCanvas { position: fixed; top: 0; left: 0; z-index: -1; }
+        .container { width: 100%; padding: 15px; margin-top: 10px; position: relative; z-index: 1; }
+        
+        .header { 
+            display: flex; justify-content: space-between; align-items: center; 
+            background: var(--glass); padding: 12px 20px; border-radius: 20px;
+            border: 1px solid var(--border); margin-bottom: 20px;
+        }
+        .logo-text { font-size: 18px; font-weight: 800; background: linear-gradient(to right, var(--purple), var(--cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+
+        .card { background: var(--glass); backdrop-filter: blur(15px); border: 1px solid var(--border); border-radius: 24px; padding: 20px; margin-bottom: 20px; }
+        
+        textarea {
+            background: rgba(0, 0, 0, 0.4); border: 1px solid var(--border); color: #10b981; padding: 15px; border-radius: 15px;
+            width: 100%; font-family: 'Fira Code', monospace; font-size: 13px; height: 200px; outline: none; margin-top: 10px;
+        }
+
+        /* Terminal Styles */
+        .terminal-container { display: flex; flex-direction: column; gap: 15px; }
+        .terminal-box {
+            background: #000; color: #a5f3fc; height: 160px; overflow-y: auto; padding: 12px; border-radius: 15px;
+            font-family: 'Fira Code', monospace; font-size: 11px; border: 1px solid var(--border); line-height: 1.4;
+        }
+        .term-lib { border-color: var(--purple); }
+        .term-out { border-color: var(--cyan); }
+        
+        .term-label { font-size: 12px; font-weight: 600; margin-bottom: 5px; display: flex; align-items: center; gap: 6px; }
+
+        .cmd-input-group { display: flex; gap: 8px; margin-top: 10px; }
+        input[type="text"] { background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border); color: var(--text); padding: 10px; border-radius: 10px; flex-grow: 1; font-size: 13px; outline: none; }
+        .btn { background: linear-gradient(45deg, var(--purple), var(--blue)); color: white; border: none; padding: 10px 18px; border-radius: 10px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; }
+        .btn-play { width: 100%; margin-top: 10px; }
+
+        .log-success { color: #10b981; }
+        .log-error { color: #ef4444; }
+        .spin { animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        /* Login Form */
+        .login-form {
+            max-width: 400px;
+            margin: 100px auto;
+            padding: 30px;
+            background: var(--glass);
+            border-radius: 20px;
+            text-align: center;
+        }
+        .login-form input {
+            width: 100%;
+            margin: 10px 0;
+            padding: 12px;
+            border-radius: 10px;
+            background: rgba(0,0,0,0.3);
+            border: 1px solid var(--border);
+            color: var(--text);
+        }
+        .login-btn {
+            width: 100%;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="bgCanvas"></canvas>
+    <div class="container">
+        <header class="header">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <i data-lucide="zap" fill="var(--cyan)" color="var(--cyan)" size="20"></i>
+                <span class="logo-text">Cyber 20 UN</span>
+            </div>
+            {% if user_id %}
+            <button onclick="location.href='/logout'" style="background:none; border:none; color:#ef4444;"><i data-lucide="log-out"></i></button>
+            {% endif %}
+        </header>
+
+        {% if not user_id %}
+        <!-- Login Form -->
+        <div class="login-form">
+            <h2 style="margin-bottom: 20px;">Welcome to Cyber 20 UN IDE</h2>
+            <p style="opacity: 0.8; margin-bottom: 30px;">Enter your username to start coding</p>
+            <form method="POST" action="/login">
+                <input type="text" name="username" placeholder="Choose a username" required>
+                <input type="text" name="project_name" placeholder="Project name (optional)" value="my_project">
+                <button type="submit" class="btn login-btn">Start Coding <i data-lucide="arrow-right"></i></button>
+            </form>
+            <p style="margin-top: 20px; font-size: 12px; opacity: 0.6;">
+                No password needed • All data saved locally • Share your project link
+            </p>
+        </div>
+        {% else %}
+        <!-- Main IDE Content -->
+        <main>
+            <div class="card">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <i data-lucide="file-code" size="18" color="var(--purple)"></i>
+                        <input type="text" id="filename" value="{{ default_file }}" style="border:none; background:none; color:white; width:80px; font-weight:600;">
+                    </div>
+                    <div style="font-size: 12px; opacity: 0.7;">
+                        Project: <strong>{{ session.get('project_name', 'default') }}</strong>
+                    </div>
+                </div>
+                <textarea id="code" placeholder="# Write code here...">{{ default_content }}</textarea>
+                <button onclick="runCode(this)" class="btn btn-play"><i data-lucide="play"></i> Run Code</button>
+            </div>
+
+            <div class="terminal-container">
+                <div class="card" style="margin-bottom: 0;">
+                    <div class="term-label" style="color: var(--purple);"><i data-lucide="package"></i> Library Installer Logs</div>
+                    <div id="lib-terminal" class="terminal-box term-lib">
+                        <div style="opacity:0.5;">[WAITING] Install libraries via command...</div>
+                    </div>
+                    <div class="cmd-input-group">
+                        <input type="text" id="cmd" placeholder="pip install ...">
+                        <button onclick="sendCmd()" class="btn"><i data-lucide="download" size="16"></i></button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="term-label" style="color: var(--cyan);"><i data-lucide="terminal"></i> Execution Output</div>
+                    <div id="out-terminal" class="terminal-box term-out">
+                        <div style="opacity:0.5;">[READY] Program output will appear here...</div>
+                    </div>
+                </div>
+            </div>
+        </main>
+        {% endif %}
+    </div>
+
+    <script>
+        lucide.createIcons();
+        const socket = io();
+
+        // Background
+        const canvas = document.getElementById('bgCanvas');
+        const ctx = canvas.getContext('2d');
+        function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+        window.onresize = resize; resize();
+        function drawBg() { ctx.fillStyle = '#020617'; ctx.fillRect(0,0,canvas.width,canvas.height); requestAnimationFrame(drawBg); }
+        drawBg();
+
+        // --- Dual Terminal Logic ---
+        socket.on('terminal_output', data => {
+            const libTerm = document.getElementById('lib-terminal');
+            const outTerm = document.getElementById('out-terminal');
+            
+            // যদি আউটপুটে pip বা installation সংক্রান্ত কিছু থাকে, তবে লাইব্রেরি টার্মিনালে যাবে
+            if(data.output.toLowerCase().includes('pip') || 
+               data.output.toLowerCase().includes('install') || 
+               data.output.toLowerCase().includes('requirement')) {
+                libTerm.innerHTML += `<div style="margin-bottom:2px;">${data.output}</div>`;
+                libTerm.scrollTop = libTerm.scrollHeight;
+            } else {
+                // বাকি সব আউটপুট এক্সিকিউশন টার্মিনালে যাবে
+                outTerm.innerHTML += `<div style="margin-bottom:2px;">> ${data.output}</div>`;
+                outTerm.scrollTop = outTerm.scrollHeight;
+            }
+        });
+
+        function sendCmd() {
+            const cmdInput = document.getElementById('cmd');
+            if(!cmdInput.value) return;
+            document.getElementById('lib-terminal').innerHTML += `<div style="color:var(--purple);">$ ${cmdInput.value}</div>`;
+            socket.emit('terminal_command', {command: cmdInput.value});
+            cmdInput.value = '';
+        }
+
+        function runCode(btn) {
+            const filename = document.getElementById('filename').value;
+            const content = document.getElementById('code').value;
+            const outTerm = document.getElementById('out-terminal');
+            
+            outTerm.innerHTML = `<div style="color:var(--cyan);">[SYSTEM] Running ${filename}...</div>`;
+            socket.emit('save_file', {filename, content});
+            socket.emit('run_code', {filename});
+            
+            btn.innerHTML = '<i data-lucide="loader" class="spin"></i> Running...';
+            lucide.createIcons();
+            setTimeout(() => { 
+                btn.innerHTML = '<i data-lucide="play"></i> Run Code'; 
+                lucide.createIcons(); 
+            }, 1500);
+        }
+        
+        // Autosave code on change
+        let saveTimer;
+        document.getElementById('code').addEventListener('input', function() {
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(() => {
+                const filename = document.getElementById('filename').value;
+                const content = document.getElementById('code').value;
+                socket.emit('save_file', {filename, content});
+            }, 1000);
+        });
+    </script>
+</body>
+</html>
+'''
+
+# ডাটাবেজ ইনিশিয়ালাইজেশন
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
     
-    # Create tables
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        ip_address TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
+    # Users table
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  username TEXT UNIQUE,
+                  ip_address TEXT,
+                  project_name TEXT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS code_files (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        filename TEXT,
-        content TEXT,
-        user_id INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id)
-    )
-    ''')
+    # Code files table
+    c.execute('''CREATE TABLE IF NOT EXISTS code_files
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  filename TEXT,
+                  content TEXT,
+                  project_name TEXT,
+                  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (user_id) REFERENCES users(id),
+                  UNIQUE(user_id, filename, project_name))''')
     
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS installed_libraries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        library_name TEXT,
-        version TEXT,
-        command TEXT,
-        user_id INTEGER,
-        installed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id)
-    )
-    ''')
+    # Libraries table
+    c.execute('''CREATE TABLE IF NOT EXISTS libraries
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  package_name TEXT,
+                  version TEXT,
+                  command TEXT,
+                  project_name TEXT,
+                  installed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (user_id) REFERENCES users(id))''')
     
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS terminal_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        terminal_type TEXT,
-        command TEXT,
-        output TEXT,
-        user_id INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id)
-    )
-    ''')
+    # Terminal logs table
+    c.execute('''CREATE TABLE IF NOT EXISTS terminal_logs
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  terminal_type TEXT,
+                  command TEXT,
+                  output TEXT,
+                  project_name TEXT,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  FOREIGN KEY (user_id) REFERENCES users(id))''')
     
     conn.commit()
     conn.close()
 
 init_db()
 
-def get_user_id():
-    """Get or create user based on session/IP"""
-    if 'user_id' in session:
-        return session['user_id']
+def get_db():
+    return sqlite3.connect(DB_PATH)
+
+def get_or_create_user(username, ip_address, project_name):
+    conn = get_db()
+    c = conn.cursor()
     
-    # Create new user based on IP
-    ip_address = request.remote_addr
-    username = f"user_{int(time.time())}_{ip_address.replace('.', '_')}"
-    
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    cursor.execute('INSERT OR IGNORE INTO users (username, ip_address) VALUES (?, ?)', 
-                   (username, ip_address))
-    
-    cursor.execute('SELECT id FROM users WHERE ip_address = ?', (ip_address,))
-    user = cursor.fetchone()
+    # Check if user exists
+    c.execute('SELECT id FROM users WHERE username = ? AND project_name = ?', 
+              (username, project_name))
+    user = c.fetchone()
     
     if user:
-        session['user_id'] = user[0]
-        session['username'] = username
-        conn.close()
-        return user[0]
-    
-    conn.close()
-    return None
-
-def save_code_file(filename, content, user_id):
-    """Save code to database"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    # Check if file exists for this user
-    cursor.execute('SELECT id FROM code_files WHERE filename = ? AND user_id = ?', 
-                   (filename, user_id))
-    existing = cursor.fetchone()
-    
-    if existing:
-        cursor.execute('UPDATE code_files SET content = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?', 
-                       (content, existing[0]))
+        user_id = user[0]
     else:
-        cursor.execute('INSERT INTO code_files (filename, content, user_id) VALUES (?, ?, ?)', 
-                       (filename, content, user_id))
+        # Create new user
+        c.execute('INSERT INTO users (username, ip_address, project_name) VALUES (?, ?, ?)',
+                  (username, ip_address, project_name))
+        user_id = c.lastrowid
+    
+    conn.commit()
+    conn.close()
+    return user_id
+
+def save_code_to_db(user_id, filename, content, project_name):
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Save to database
+    c.execute('''INSERT OR REPLACE INTO code_files 
+                 (user_id, filename, content, project_name) 
+                 VALUES (?, ?, ?, ?)''',
+              (user_id, filename, content, project_name))
+    
+    # Also save to file system
+    user_dir = CODE_DIR / str(user_id)
+    user_dir.mkdir(exist_ok=True)
+    
+    file_path = user_dir / filename
+    with open(file_path, 'w', encoding='utf-8') as f:
+        f.write(content)
     
     conn.commit()
     conn.close()
 
-def save_library_install(command, output, user_id):
-    """Save library installation to database"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    # Extract library names from command
-    libs = []
-    if 'install' in command.lower():
-        parts = command.lower().split('install')
-        if len(parts) > 1:
-            libs = [lib.strip() for lib in parts[1].split() if lib.strip()]
-    
-    for lib in libs:
-        # Remove version specifiers
-        lib_name = lib.split('==')[0].split('>')[0].split('<')[0].split('~=')[0]
-        
-        # Extract version from output if available
-        version = "unknown"
-        lines = output.split('\n')
-        for line in lines:
-            if lib_name.lower() in line.lower() and 'already satisfied' in line.lower():
-                if '==' in line:
-                    version = line.split('==')[-1].strip()
-                break
-        
-        cursor.execute('''
-        INSERT INTO installed_libraries (library_name, version, command, user_id) 
-        VALUES (?, ?, ?, ?)
-        ''', (lib_name, version, command, user_id))
-    
+def save_library_to_db(user_id, package_name, version, command, project_name):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''INSERT INTO libraries 
+                 (user_id, package_name, version, command, project_name) 
+                 VALUES (?, ?, ?, ?, ?)''',
+              (user_id, package_name, version, command, project_name))
     conn.commit()
     conn.close()
 
-def save_terminal_log(terminal_type, command, output, user_id):
-    """Save terminal activity to database"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    INSERT INTO terminal_logs (terminal_type, command, output, user_id) 
-    VALUES (?, ?, ?, ?)
-    ''', (terminal_type, command[:500], output[:10000], user_id))
-    
+def save_terminal_log(user_id, terminal_type, command, output, project_name):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''INSERT INTO terminal_logs 
+                 (user_id, terminal_type, command, output, project_name) 
+                 VALUES (?, ?, ?, ?, ?)''',
+              (user_id, terminal_type, command, output, project_name))
     conn.commit()
     conn.close()
 
-def load_user_data(user_id):
-    """Load user's saved data"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+def get_user_data(user_id, project_name):
+    conn = get_db()
+    c = conn.cursor()
     
-    # Get code files
-    cursor.execute('SELECT filename, content FROM code_files WHERE user_id = ? ORDER BY created_at DESC', 
-                   (user_id,))
-    code_files = cursor.fetchall()
+    # Get default code file
+    c.execute('''SELECT filename, content FROM code_files 
+                 WHERE user_id = ? AND project_name = ? 
+                 ORDER BY updated_at DESC LIMIT 1''',
+              (user_id, project_name))
+    file_data = c.fetchone()
     
     # Get installed libraries
-    cursor.execute('''
-    SELECT DISTINCT library_name, version 
-    FROM installed_libraries 
-    WHERE user_id = ? 
-    ORDER BY installed_at DESC
-    ''', (user_id,))
-    libraries = cursor.fetchall()
-    
-    # Get recent terminal logs
-    cursor.execute('''
-    SELECT terminal_type, command, output 
-    FROM terminal_logs 
-    WHERE user_id = ? 
-    ORDER BY created_at DESC 
-    LIMIT 50
-    ''', (user_id,))
-    logs = cursor.fetchall()
+    c.execute('''SELECT package_name, version FROM libraries 
+                 WHERE user_id = ? AND project_name = ? 
+                 ORDER BY installed_at DESC''',
+              (user_id, project_name))
+    libraries = c.fetchall()
     
     conn.close()
     
     return {
-        'code_files': code_files,
-        'libraries': libraries,
-        'logs': logs
+        'default_file': file_data[0] if file_data else 'main.py',
+        'default_content': file_data[1] if file_data else '# Write code here...',
+        'libraries': libraries
     }
 
-@app.route('/')
+# রাউটস
+@app.route('/', methods=['GET', 'POST'])
 def index():
-    user_id = get_user_id()
-    if user_id:
-        user_data = load_user_data(user_id)
-        
-        # Find main.py or first file
-        default_file = 'main.py'
-        default_content = '# Write code here...'
-        
-        for filename, content in user_data['code_files']:
-            if filename == 'main.py':
-                default_file = filename
-                default_content = content
-                break
-        elif user_data['code_files']:
-            default_file = user_data['code_files'][0][0]
-            default_content = user_data['code_files'][0][1]
-        
-        return render_template('index.html', 
-                             default_file=default_file,
-                             default_content=default_content,
-                             libraries=user_data['libraries'],
-                             logs=user_data['logs'])
-    return render_template('index.html')
+    if 'user_id' in session and 'project_name' in session:
+        user_data = get_user_data(session['user_id'], session['project_name'])
+        return render_template_string(HTML_TEMPLATE, 
+                                    user_id=session['user_id'],
+                                    default_file=user_data['default_file'],
+                                    default_content=user_data['default_content'])
+    
+    return render_template_string(HTML_TEMPLATE, user_id=None)
+
+@app.route('/login', methods=['POST'])
+def login():
+    username = request.form.get('username', '').strip()
+    project_name = request.form.get('project_name', 'default').strip()
+    
+    if not username:
+        return redirect('/')
+    
+    user_id = get_or_create_user(username, request.remote_addr, project_name)
+    
+    session['user_id'] = user_id
+    session['username'] = username
+    session['project_name'] = project_name
+    
+    return redirect('/')
 
 @app.route('/logout')
 def logout():
     session.clear()
-    return redirect(url_for('index'))
+    return redirect('/')
 
-# Create code_files directory if not exists
-if not os.path.exists('code_files'):
-    os.makedirs('code_files')
+@app.route('/api/user_data')
+def api_user_data():
+    if 'user_id' not in session:
+        return jsonify({'error': 'Not logged in'})
+    
+    user_data = get_user_data(session['user_id'], session.get('project_name', 'default'))
+    return jsonify(user_data)
 
-def run_command_in_virtualenv(command, user_id, terminal_type="lib"):
-    """Run command in virtual environment"""
-    try:
-        # Activate virtualenv if exists
-        if os.path.exists('venv'):
-            if os.name == 'nt':  # Windows
-                activate_cmd = 'venv\\Scripts\\activate && '
-            else:  # Unix/Linux/Mac
-                activate_cmd = 'source venv/bin/activate && '
-            full_command = f'{activate_cmd}{command}'
-        else:
-            full_command = command
-        
-        # Run the command
-        process = subprocess.Popen(
-            full_command if os.name == 'nt' else ['bash', '-c', full_command],
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd='.'  # Run in current directory
-        )
-        
-        output_lines = []
-        # Read output in real-time
-        while True:
-            output = process.stdout.readline()
-            if output == '' and process.poll() is not None:
-                break
-            if output:
-                output_lines.append(output.strip())
-                # Send to WebSocket
-                socketio.emit('terminal_output', {'output': output.strip()})
-        
-        # Get any remaining output
-        stdout, stderr = process.communicate()
-        if stderr:
-            output_lines.append(f"ERROR: {stderr.strip()}")
-            socketio.emit('terminal_output', {'output': f"ERROR: {stderr.strip()}"})
-        
-        full_output = '\n'.join(output_lines)
-        
-        # Save to database
-        save_terminal_log(terminal_type, command, full_output, user_id)
-        
-        # If pip install, save libraries
-        if 'pip' in command and 'install' in command:
-            save_library_install(command, full_output, user_id)
-        
-        return full_output
-        
-    except Exception as e:
-        error_msg = f"Command execution error: {str(e)}"
-        socketio.emit('terminal_output', {'output': error_msg})
-        save_terminal_log(terminal_type, command, error_msg, user_id)
-        return error_msg
+@app.route('/api/projects')
+def api_projects():
+    if 'username' not in session:
+        return jsonify({'error': 'Not logged in'})
+    
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''SELECT DISTINCT project_name FROM users 
+                 WHERE username = ? ORDER BY created_at DESC''',
+              (session['username'],))
+    projects = [row[0] for row in c.fetchall()]
+    conn.close()
+    
+    return jsonify({'projects': projects})
 
+# WebSocket হ্যান্ডলারস
 @socketio.on('connect')
 def handle_connect():
-    user_id = get_user_id()
-    print(f"Client connected - User ID: {user_id}")
-    
-    # Send initial terminal state
-    if user_id:
-        user_data = load_user_data(user_id)
-        
-        # Send recent library logs
-        lib_logs = [log for log in user_data['logs'] if log[0] == 'lib']
-        for log in lib_logs[:10]:  # Last 10 library logs
-            emit('terminal_output', {'output': log[2]})
-        
-        # Send message
-        emit('terminal_output', {'output': f"[SYSTEM] Connected as {session.get('username', 'Guest')}"})
-
-@socketio.on('terminal_command')
-def handle_terminal_command(data):
-    user_id = get_user_id()
-    if not user_id:
-        return
-    
-    command = data.get('command', '').strip()
-    if not command:
-        return
-    
-    # Run the command
-    run_command_in_virtualenv(command, user_id, "lib")
+    if 'user_id' in session:
+        emit('terminal_output', {'output': f'[SYSTEM] Connected as {session["username"]} ({session["project_name"]})'})
 
 @socketio.on('save_file')
 def handle_save_file(data):
-    user_id = get_user_id()
-    if not user_id:
+    if 'user_id' not in session:
         return
     
-    filename = data.get('filename', 'main.py').strip()
+    filename = data.get('filename', 'main.py')
     content = data.get('content', '')
+    project_name = session.get('project_name', 'default')
     
-    # Save to database
-    save_code_file(filename, content, user_id)
-    
-    # Also save to file system for execution
-    filepath = os.path.join('code_files', f"{user_id}_{filename}")
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.write(content)
-    
-    print(f"File saved: {filename} for user {user_id}")
+    save_code_to_db(session['user_id'], filename, content, project_name)
+    emit('terminal_output', {'output': f'[SYSTEM] Saved {filename}'})
 
 @socketio.on('run_code')
 def handle_run_code(data):
-    user_id = get_user_id()
-    if not user_id:
+    if 'user_id' not in session:
         return
     
-    filename = data.get('filename', 'main.py').strip()
-    filepath = os.path.join('code_files', f"{user_id}_{filename}")
+    filename = data.get('filename', 'main.py')
+    project_name = session.get('project_name', 'default')
+    user_dir = CODE_DIR / str(session['user_id'])
+    file_path = user_dir / filename
     
-    if not os.path.exists(filepath):
-        socketio.emit('terminal_output', {'output': f"[ERROR] File {filename} not found!"})
+    if not file_path.exists():
+        emit('terminal_output', {'output': f'[ERROR] File {filename} not found'})
         return
     
-    # Run the Python code
-    try:
-        if os.path.exists('venv'):
-            if os.name == 'nt':  # Windows
-                python_cmd = 'venv\\Scripts\\python'
-            else:  # Unix/Linux/Mac
-                python_cmd = 'venv/bin/python'
-        else:
-            python_cmd = 'python'
-        
-        command = f'{python_cmd} "{filepath}"'
-        
-        # Run the code
-        socketio.emit('terminal_output', {'output': f"[SYSTEM] Executing {filename}..."})
-        
-        process = subprocess.Popen(
-            command if os.name == 'nt' else ['bash', '-c', command],
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        # Read output in real-time
-        while True:
-            output = process.stdout.readline()
-            if output == '' and process.poll() is not None:
-                break
-            if output:
-                socketio.emit('terminal_output', {'output': output.strip()})
-        
-        # Get any remaining output
-        stdout, stderr = process.communicate()
-        if stdout:
-            socketio.emit('terminal_output', {'output': stdout.strip()})
-        if stderr:
-            socketio.emit('terminal_output', {'output': f"ERROR: {stderr.strip()}"})
-        
-        # Save execution log
-        full_output = (stdout + stderr) if stderr else stdout
-        save_terminal_log("exec", f"python {filename}", full_output, user_id)
-        
-    except Exception as e:
-        error_msg = f"[ERROR] Execution failed: {str(e)}"
-        socketio.emit('terminal_output', {'output': error_msg})
-        save_terminal_log("exec", f"python {filename}", error_msg, user_id)
+    def run_python_code():
+        try:
+            # Run the code
+            process = subprocess.Popen(
+                ['python', str(file_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=str(user_dir)
+            )
+            
+            # Read output in real-time
+            for line in process.stdout:
+                if line.strip():
+                    emit('terminal_output', {'output': line.strip()})
+                    save_terminal_log(
+                        session['user_id'], 
+                        'exec', 
+                        f'python {filename}', 
+                        line.strip(),
+                        project_name
+                    )
+            
+            process.wait()
+            
+        except Exception as e:
+            error_msg = f'[ERROR] {str(e)}'
+            emit('terminal_output', {'output': error_msg})
+            save_terminal_log(
+                session['user_id'], 
+                'exec', 
+                f'python {filename}', 
+                error_msg,
+                project_name
+            )
+    
+    # Run in background thread
+    thread = threading.Thread(target=run_python_code)
+    thread.start()
 
-# Admin route to view all data (optional)
-@app.route('/admin')
-def admin():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+@socketio.on('terminal_command')
+def handle_terminal_command(data):
+    if 'user_id' not in session:
+        return
     
-    cursor.execute('SELECT COUNT(*) FROM users')
-    user_count = cursor.fetchone()[0]
+    command = data.get('command', '').strip()
+    project_name = session.get('project_name', 'default')
     
-    cursor.execute('SELECT COUNT(*) FROM code_files')
-    file_count = cursor.fetchone()[0]
+    if not command:
+        return
     
-    cursor.execute('SELECT COUNT(DISTINCT library_name) FROM installed_libraries')
-    lib_count = cursor.fetchone()[0]
+    emit('terminal_output', {'output': f'$ {command}'})
+    
+    def execute_command():
+        try:
+            # Check if it's a pip install command
+            is_pip_install = command.startswith('pip install')
+            
+            # Run command
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=str(CODE_DIR / str(session['user_id']))
+            )
+            
+            # Read output
+            output_lines = []
+            for line in process.stdout:
+                if line.strip():
+                    output = line.strip()
+                    emit('terminal_output', {'output': output})
+                    output_lines.append(output)
+            
+            process.wait()
+            full_output = '\n'.join(output_lines)
+            
+            # Save terminal log
+            terminal_type = 'lib' if is_pip_install else 'cmd'
+            save_terminal_log(
+                session['user_id'],
+                terminal_type,
+                command,
+                full_output,
+                project_name
+            )
+            
+            # If pip install, save library info
+            if is_pip_install:
+                # Parse package name from command
+                parts = command.split()
+                if len(parts) >= 3:
+                    package_name = parts[2]
+                    # Try to extract version
+                    version = 'latest'
+                    if '==' in package_name:
+                        package_name, version = package_name.split('==')
+                    
+                    save_library_to_db(
+                        session['user_id'],
+                        package_name,
+                        version,
+                        command,
+                        project_name
+                    )
+                    
+        except Exception as e:
+            error_msg = f'[ERROR] Command failed: {str(e)}'
+            emit('terminal_output', {'output': error_msg})
+            save_terminal_log(
+                session['user_id'],
+                'error',
+                command,
+                error_msg,
+                project_name
+            )
+    
+    # Run in background thread
+    thread = threading.Thread(target=execute_command)
+    thread.start()
+
+@app.route('/api/export/<username>/<project_name>')
+def export_project(username, project_name):
+    """Export project data as JSON"""
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Get user ID
+    c.execute('SELECT id FROM users WHERE username = ? AND project_name = ?',
+              (username, project_name))
+    user = c.fetchone()
+    
+    if not user:
+        return jsonify({'error': 'Project not found'})
+    
+    user_id = user[0]
+    
+    # Get all data
+    c.execute('SELECT filename, content FROM code_files WHERE user_id = ? AND project_name = ?',
+              (user_id, project_name))
+    code_files = [{'filename': row[0], 'content': row[1]} for row in c.fetchall()]
+    
+    c.execute('SELECT package_name, version, command FROM libraries WHERE user_id = ? AND project_name = ?',
+              (user_id, project_name))
+    libraries = [{'package': row[0], 'version': row[1], 'command': row[2]} for row in c.fetchall()]
     
     conn.close()
     
-    return f"""
-    <h1>Cyber 20 UN Admin</h1>
-    <p>Total Users: {user_count}</p>
-    <p>Code Files: {file_count}</p>
-    <p>Unique Libraries: {lib_count}</p>
-    <p><a href="/">Back to IDE</a></p>
-    """
+    return jsonify({
+        'username': username,
+        'project_name': project_name,
+        'code_files': code_files,
+        'libraries': libraries,
+        'exported_at': datetime.now().isoformat()
+    })
 
-# Cleanup function
+# Cleanup old files periodically
 def cleanup_old_files():
-    """Clean up old temporary files"""
-    try:
-        for file in os.listdir('code_files'):
-            if file.endswith('.py'):
-                filepath = os.path.join('code_files', file)
-                # Remove files older than 7 days
-                if os.path.getmtime(filepath) < time.time() - (7 * 24 * 3600):
-                    os.remove(filepath)
-    except:
-        pass
+    """Clean up files older than 30 days"""
+    while True:
+        try:
+            for user_dir in CODE_DIR.iterdir():
+                if user_dir.is_dir():
+                    for file in user_dir.iterdir():
+                        # Check if file is older than 30 days
+                        if file.stat().st_mtime < time.time() - (30 * 24 * 3600):
+                            file.unlink()
+        except:
+            pass
+        
+        time.sleep(24 * 3600)  # Run once per day
 
-atexit.register(cleanup_old_files)
+# Start cleanup thread
+cleanup_thread = threading.Thread(target=cleanup_old_files, daemon=True)
+cleanup_thread.start()
 
 if __name__ == '__main__':
+    print("=" * 50)
     print("Cyber 20 UN IDE Server Starting...")
-    print("Database initialized at:", DB_NAME)
-    print("Access the IDE at: http://localhost:5000")
-    print("Access admin panel at: http://localhost:5000/admin")
+    print("=" * 50)
+    print(f"Database: {DB_PATH}")
+    print(f"Code directory: {CODE_DIR}")
+    print(f"Access URL: http://localhost:5000")
+    print(f"Local network URL: http://{os.popen('hostname -I').read().strip()}:5000")
+    print("=" * 50)
     
     # Create virtual environment if not exists
     if not os.path.exists('venv'):
-        print("Note: Virtual environment not found. Creating one...")
-        os.system('python -m venv venv')
-        print("Virtual environment created. Install packages with: pip install <package>")
+        print("Creating virtual environment...")
+        subprocess.run(['python', '-m', 'venv', 'venv'], check=False)
+        print("Virtual environment created at 'venv/'")
     
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
